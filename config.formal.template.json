@@ -1,0 +1,51 @@
+{
+  "label": "experiment3-formal",
+  "smoke_only": false,
+  "paths": {
+    "fastwam_repo": "../FastWAM",
+    "openwam_repo": "../OpenWAM",
+    "robotwin_repo": "../RoboTwin",
+    "robotwin_python": "REPLACE_ME",
+    "manifest_root": "manifests/100_episodes"
+  },
+  "protocol": {
+    "episodes": 100,
+    "seed": 0,
+    "instruction_type": "unseen"
+  },
+  "runtimes": {
+    "fastwam": {"conda_env": "fastwam"},
+    "openwam": {"conda_env": "openwam"}
+  },
+  "hardware": {
+    "fastwam_gpu": 4,
+    "openwam_model_gpu": 6,
+    "openwam_sim_gpu": 0,
+    "openwam_host": "127.0.0.1",
+    "openwam_port": 8848
+  },
+  "models": {
+    "fastwam": {
+      "no_wm": {
+        "checkpoint": "REPLACE_ME",
+        "dataset_stats": "REPLACE_ME",
+        "task_config": "REPLACE_ME"
+      },
+      "wm": {
+        "checkpoint": "REPLACE_ME",
+        "dataset_stats": "REPLACE_ME",
+        "task_config": "REPLACE_ME"
+      }
+    },
+    "openwam": {
+      "no_wm": {
+        "checkpoint_dir": "REPLACE_ME",
+        "deploy_args": []
+      },
+      "wm": {
+        "checkpoint_dir": "REPLACE_ME",
+        "deploy_args": []
+      }
+    }
+  }
+}

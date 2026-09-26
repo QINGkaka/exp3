@@ -1,0 +1,11 @@
+# Provisional task-level OOD split, 2026-09-24.
+adjust_bottle
+grab_roller
+place_container_plate
+move_pillbottle_pad
+move_can_pot
+open_microwave
+press_stapler
+stack_bowls_three
+handover_block
+turn_switch

@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+config.formal.json
+config.smoke.json
+manifests/
+runs/
+
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.mp4
+*.h5

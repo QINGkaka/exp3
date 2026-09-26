@@ -1,0 +1,175 @@
+diff --git a/configs/sim_robotwin.yaml b/configs/sim_robotwin.yaml
+index f2121b6..4adea4d 100644
+--- a/configs/sim_robotwin.yaml
++++ b/configs/sim_robotwin.yaml
+@@ -17,6 +17,7 @@ EVALUATION:
+   robotwin_root: third_party/RoboTwin
+   policy_name: fastwam_policy
+   task_name: null
++  task_file: null
+   task_config: demo_randomized
+   instruction_type: unseen
+   eval_num_episodes: 100
+@@ -41,6 +42,7 @@ EVALUATION:
+ MULTIRUN:
+   enabled: false
+   num_gpus: 8
++  gpu_ids: null
+   max_tasks_per_gpu: 2
+ 
+ hydra:
+diff --git a/experiments/robotwin/run_robotwin_manager.py b/experiments/robotwin/run_robotwin_manager.py
+index 981cbd4..704ef0c 100644
+--- a/experiments/robotwin/run_robotwin_manager.py
++++ b/experiments/robotwin/run_robotwin_manager.py
+@@ -83,6 +83,26 @@ def _load_all_tasks() -> list[str]:
+     return dedup_tasks
+ 
+ 
++def _load_task_file(path_str: str) -> list[str]:
++    task_file = _resolve_path(path_str, base=PROJECT_ROOT)
++    if not task_file.is_file():
++        raise FileNotFoundError(f"Task file not found: {task_file}")
++
++    tasks: list[str] = []
++    seen: set[str] = set()
++    for raw_line in task_file.read_text(encoding="utf-8").splitlines():
++        task = raw_line.split("#", 1)[0].strip()
++        if not task or task in seen:
++            continue
++        if not task.replace("_", "").isalnum():
++            raise ValueError(f"Invalid task name {task!r} in {task_file}")
++        seen.add(task)
++        tasks.append(task)
++    if not tasks:
++        raise ValueError(f"Task file is empty: {task_file}")
++    return tasks
++
++
+ def _parse_success_rate(result_file: Path) -> float:
+     if not result_file.exists():
+         raise FileNotFoundError(f"Result file not found: {result_file}")
+@@ -146,14 +166,19 @@ def main(cfg: DictConfig):
+     if not robotwin_root.exists():
+         raise FileNotFoundError(f"RoboTwin root not found: {robotwin_root}")
+ 
+-    num_gpus = int(cfg.MULTIRUN.num_gpus)
+-    if num_gpus <= 0:
+-        raise ValueError("`MULTIRUN.num_gpus` must be > 0.")
++    gpu_ids_cfg = cfg.MULTIRUN.gpu_ids
++    if gpu_ids_cfg is None:
++        num_gpus = int(cfg.MULTIRUN.num_gpus)
++        if num_gpus <= 0:
++            raise ValueError("`MULTIRUN.num_gpus` must be > 0.")
++        gpu_ids = list(range(num_gpus))
++    else:
++        gpu_ids = [int(gpu_id) for gpu_id in gpu_ids_cfg]
++        if not gpu_ids or len(set(gpu_ids)) != len(gpu_ids) or any(gpu_id < 0 for gpu_id in gpu_ids):
++            raise ValueError("`MULTIRUN.gpu_ids` must contain unique non-negative GPU IDs.")
+     max_tasks_per_gpu = int(cfg.MULTIRUN.max_tasks_per_gpu)
+     if max_tasks_per_gpu <= 0:
+         raise ValueError("`MULTIRUN.max_tasks_per_gpu` must be > 0.")
+-    gpu_ids = list(range(num_gpus))
+-
+     output_dir = _resolve_path(str(cfg.EVALUATION.output_dir), base=PROJECT_ROOT)
+     run_ts = output_dir.name
+     if run_ts == "":
+@@ -167,10 +192,17 @@ def main(cfg: DictConfig):
+     summary_json = run_output_dir / "summary.json"
+ 
+     task_name_cfg = cfg.EVALUATION.task_name
+-    if task_name_cfg is None or str(task_name_cfg).strip() == "":
+-        tasks = _load_all_tasks()
+-    else:
++    task_file_cfg = cfg.EVALUATION.task_file
++    has_task_name = task_name_cfg is not None and str(task_name_cfg).strip() != ""
++    has_task_file = task_file_cfg is not None and str(task_file_cfg).strip() != ""
++    if has_task_name and has_task_file:
++        raise ValueError("Set only one of `EVALUATION.task_name` and `EVALUATION.task_file`.")
++    if has_task_file:
++        tasks = _load_task_file(str(task_file_cfg))
++    elif has_task_name:
+         tasks = [str(task_name_cfg)]
++    else:
++        tasks = _load_all_tasks()
+ 
+     extra_overrides = _collect_worker_overrides()
+ 
+diff --git a/third_party/RoboTwin/script/eval_policy.py b/third_party/RoboTwin/script/eval_policy.py
+index bada191..2bafebf 100644
+--- a/third_party/RoboTwin/script/eval_policy.py
++++ b/third_party/RoboTwin/script/eval_policy.py
+@@ -1,6 +1,7 @@
+ import sys
+ import os
+ import subprocess
++import json
+ 
+ sys.path.append("./")
+ sys.path.append(f"./policy")
+@@ -245,7 +246,19 @@ def eval_policy(task_name,
+     print(f"\033[34mTask Name: {args['task_name']}\033[0m")
+     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
+ 
+-    expert_check = True
++    manifest = None
++    manifest_root = os.environ.get("FASTWAM_ROBOTWIN_MANIFEST_ROOT")
++    if manifest_root:
++        manifest_path = Path(manifest_root) / task_name / args["task_config"] / "manifest.json"
++        with manifest_path.open("r", encoding="utf-8") as f:
++            manifest = json.load(f)
++        if manifest.get("task") != task_name or manifest.get("mode") != args["task_config"]:
++            raise ValueError(f"Manifest does not match {task_name}/{args['task_config']}: {manifest_path}")
++        if len(manifest.get("entries", [])) < test_num:
++            raise ValueError(f"Manifest has fewer than {test_num} entries: {manifest_path}")
++        print(f"Using fixed episode manifest: {manifest_path}")
++
++    expert_check = manifest is None
+     TASK_ENV.suc = 0
+     TASK_ENV.test_num = 0
+ 
+@@ -264,6 +277,10 @@ def eval_policy(task_name,
+     args["eval_mode"] = True
+ 
+     while succ_seed < test_num:
++        manifest_entry = None
++        if manifest is not None:
++            manifest_entry = manifest["entries"][succ_seed]
++            now_seed = int(manifest_entry["seed"])
+         render_freq = args["render_freq"]
+         args["render_freq"] = 0
+ 
+@@ -304,6 +321,8 @@ def eval_policy(task_name,
+         try:
+             TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+         except UnStableError as e:
++            if manifest is not None:
++                raise RuntimeError(f"Manifest seed {now_seed} became unstable") from e
+             # This seed passed expert_check but failed during rollout env init.
+             # Roll back the accepted-seed counter and skip to next seed.
+             succ_seed -= 1
+@@ -313,6 +332,8 @@ def eval_policy(task_name,
+             now_seed += 1
+             continue
+         except Exception as e:
++            if manifest is not None:
++                raise RuntimeError(f"Manifest seed {now_seed} failed during setup") from e
+             succ_seed -= 1
+             if len(suc_test_seed_list) > 0 and suc_test_seed_list[-1] == now_seed:
+                 suc_test_seed_list.pop()
+@@ -324,9 +345,12 @@ def eval_policy(task_name,
+             now_seed += 1
+             print("error occurs !")
+             continue
+-        episode_info_list = [episode_info["info"]]
+-        results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
+-        instruction = np.random.choice(results[0][instruction_type])
++        if manifest_entry is not None:
++            instruction = manifest_entry["instructions"][instruction_type]
++        else:
++            episode_info_list = [episode_info["info"]]
++            results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
++            instruction = np.random.choice(results[0][instruction_type])
+         TASK_ENV.set_instruction(instruction=instruction)  # set language instruction
+ 
+         current_video_path = None
