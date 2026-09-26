@@ -1,8 +1,8 @@
-# World Model Action Evaluation
+# Experiment 3: RoboTwin Evaluation
 
-Independent evaluation harness for the RoboTwin experiments. Model repositories
-remain external dependencies; this repository owns the protocol, task splits,
-episode manifests, scheduling, provenance, and result aggregation.
+Evaluation runner for the `Seen/Unseen x Clean/Randomized` experiment. FastWAM,
+OpenWAM, and RoboTwin remain external repositories; this repository stores the
+task split, shared episode manifests, model adapters, and result aggregation.
 
 ## Layout
 
@@ -15,11 +15,10 @@ patches/fastwam-eval.patch     minimal FastWAM evaluation-interface patch
 run_experiment3.py             Experiment 3 protocol and reporting
 ```
 
-FastWAM and OpenWAM are not compared as if they were the same backbone. For
-each family, the formal comparison is `no_wm` versus `wm` under an otherwise
-identical evaluator and deployment.
+The formal comparison is `no_wm` versus `wm` within each model family. FastWAM
+and OpenWAM are not treated as identical backbones.
 
-## Upstream setup
+## Required Upstreams
 
 The verified revisions are:
 
@@ -29,26 +28,23 @@ The verified revisions are:
 | OpenWAM | `f6d9f1059eb63a8a76dc60e07da2dad21615a161` |
 | RoboTwin for OpenWAM | `0aeea2d669c0f8516f4d5785f0aa33ba812c14b4` |
 
-OpenWAM is used without source changes. FastWAM needs a small evaluator patch;
-it does not alter model construction, forward passes, action sampling, or
-checkpoint loading:
+Check out these repositories next to this repository, or set their absolute
+paths in the configuration. OpenWAM is used without source changes. FastWAM
+needs the included evaluation patch; it does not change model inference or
+checkpoint loading.
 
 ```bash
 git -C /path/to/FastWAM apply /path/to/experiment3/patches/fastwam-eval.patch
 python check_upstreams.py --config config.smoke.json
 ```
 
-`check_upstreams.py` checks all three revisions, verifies that OpenWAM and the
-official RoboTwin checkout have no tracked modifications, and confirms that
-the FastWAM patch is applied.
+After filling in `config.smoke.json`, `check_upstreams.py` verifies the three
+commits, rejects unexpected tracked changes, and confirms the FastWAM patch.
 
-## Protocol
+## Evaluation Protocol
 
-The harness builds sealed episode manifests with the verified official
-RoboTwin checkout. Every adapter receives the same initial-state seed and
-instruction for a logical episode. OpenWAM consumes the manifest through its
-official `labtasker run_eval` interface; FastWAM consumes it through the small
-patch above.
+RoboTwin generates a manifest containing each episode's task, mode, seed,
+initial state, and instruction. Every model evaluates the same manifests.
 
 Experiment 3 evaluates:
 
@@ -59,40 +55,31 @@ Unseen + Clean
 Unseen + Randomized
 ```
 
-Each cell is run for both `no_wm` and `wm`. The runner records repository
-revisions, resolved configuration, checkpoint paths, hardware assignment, raw
-results, per-task rates, aggregate rates, and WM absolute/relative gains.
+Each condition is run for both `no_wm` and `wm`. The runner stores the resolved
+configuration, repository commits, logs, per-task success rates, aggregate
+rates, and WM improvement.
 
 ## Configuration
 
-Paths may be absolute or relative to the JSON configuration file. Conda names
-are configuration values rather than hard-coded paths:
+Create a machine-local configuration and fill in repository paths, Python or
+Conda environments, GPU IDs, and checkpoint paths:
 
-```json
-"runtimes": {
-  "fastwam": {"conda_env": "fastwam"},
-  "openwam": {"conda_env": "openwam"}
-}
+```bash
+cp config.smoke.example.json config.smoke.json
+# or, for the formal run:
+cp config.formal.template.json config.formal.json
 ```
 
-An explicit command can be used instead:
-
-```json
-"runtimes": {
-  "fastwam": {"command": ["/path/to/fastwam/bin/python"]}
-}
-```
-
-Create `config.smoke.json` from `config.smoke.example.json`, or create
-`config.formal.json` from `config.formal.template.json`. Fill in the RoboTwin
-Python path and checkpoint entries. Both machine-local files are ignored by
-Git.
+Paths may be absolute or relative to the configuration file. The two local
+configuration files are ignored by Git.
 
 ## Commands
 
 ```bash
 python run_experiment3.py validate --config config.smoke.json
+python check_upstreams.py --config config.smoke.json
 python run_experiment3.py run --config config.smoke.json --split unseen --dry-run
+python run_experiment3.py run --config config.smoke.json --split unseen
 python run_experiment3.py run --config config.formal.json
 python run_experiment3.py summarize --run-dir runs/<run-id>
 ```
@@ -100,26 +87,32 @@ python run_experiment3.py summarize --run-dir runs/<run-id>
 The released-checkpoint smoke run only verifies the pipeline. It is not formal
 OOD evidence because those checkpoints were not trained with this 40/10 split.
 
-## Adding Another Model
+## Outputs
 
-Add one adapter under `wm_eval/adapters/` and register it in
-`wm_eval/adapters/__init__.py`. An adapter receives the common `EvalContext` and
-implements:
+Each run is written under `runs/<run-id>/` and includes:
 
-```python
-run(method, model, splits, run_root, dry_run)
+```text
+config.json                 resolved configuration
+metadata.json               commits, protocol, and hardware
+<family>/<method>/<split>/  logs and normalized results
+summary/summary.md           success-rate table
+summary/success_rates.csv    machine-readable summary
 ```
 
-It must consume the sealed manifests and emit the shared `result.json` schema
-through `context.write_result(...)`. No Experiment 3 scheduling or reporting
-code needs to be copied.
+`runs/` and generated manifests are intentionally not committed.
 
-The same runtime and adapter layer can support Experiment 1. That experiment
-needs a separate runner because it repeats one fixed initial state 32 times and
-reports per-state probabilities instead of four aggregate cells.
+## Extending the Runner
+
+To add another model, implement an adapter under `wm_eval/adapters/` and
+register it in `wm_eval/adapters/__init__.py`. The adapter must consume the
+shared manifests and write the common result format through
+`EvalContext.write_result(...)`.
+
+Experiment 1 can reuse the environment startup, manifest, and adapter approach,
+but needs a separate runner and per-rollout result format for 32 samples of one
+fixed simulator state.
 
 ## Git Hygiene
 
-The `.gitignore` excludes runs, manifests, formal local configuration,
-checkpoints, videos, and datasets. Do not commit upstream repositories, conda
-environments, cuRobo source copies, or symlinks into local asset trees.
+The `.gitignore` excludes runs, manifests, machine-local configuration,
+checkpoints, videos, and datasets.
