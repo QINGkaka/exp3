@@ -76,7 +76,11 @@ def validate(config: dict[str, Any]) -> None:
     if set(seen) | set(unseen) != set(all_tasks):
         errors.append("seen_40 + unseen_10 does not exactly equal all_50")
 
-    required_paths = ("fastwam_repo", "openwam_repo", "robotwin_repo", "robotwin_python")
+    required_paths = ["robotwin_repo", "robotwin_python"]
+    if "fastwam" in config.get("models", {}):
+        required_paths.append("fastwam_repo")
+    if "openwam" in config.get("models", {}):
+        required_paths.append("openwam_repo")
     for key in required_paths:
         value = Path(config["paths"][key])
         if not value.exists():
@@ -117,7 +121,7 @@ def ensure_manifests(
 
     for split in splits:
         for task in context.tasks(split):
-            for mode in CONDITIONS.values():
+            for mode in context.conditions.values():
                 task_dir = manifest_root / task / mode
                 manifest_path = task_dir / "manifest.json"
                 if manifest_path.is_file():
@@ -161,7 +165,7 @@ def summarize(run_root: Path) -> None:
     rows: list[dict[str, Any]] = []
     lookup: dict[tuple[str, str, str, str], float] = {}
     for result in results:
-        for condition in CONDITIONS:
+        for condition in result.get("means", {}):
             key = (result["family"], result["method"], result["split"], condition)
             lookup[key] = float(result["means"][condition])
             rows.append({
@@ -220,6 +224,10 @@ def main() -> None:
     parser.add_argument("--family", choices=("all", "fastwam", "openwam"), default="all")
     parser.add_argument("--method", default="all")
     parser.add_argument("--split", choices=("all", "seen", "unseen"), default="all")
+    task_group = parser.add_mutually_exclusive_group()
+    task_group.add_argument("--task", help="Run one task only (for a paired smoke rollout)")
+    task_group.add_argument("--tasks", help="Run a comma-separated subset of tasks")
+    parser.add_argument("--condition", choices=("all", "clean", "randomized"), default="all")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -260,7 +268,17 @@ def main() -> None:
 
     families = list(config["models"]) if args.family == "all" else [args.family]
     splits = list(SPLITS) if args.split == "all" else [args.split]
-    context = EvalContext(config=config, splits=SPLITS, conditions=CONDITIONS)
+    conditions = CONDITIONS if args.condition == "all" else {args.condition: CONDITIONS[args.condition]}
+    task_filter = None
+    if args.task:
+        task_filter = (args.task,)
+    elif args.tasks:
+        task_filter = tuple(task.strip() for task in args.tasks.split(",") if task.strip())
+        if not task_filter:
+            parser.error("--tasks must contain at least one task")
+        if len(set(task_filter)) != len(task_filter):
+            parser.error("--tasks must not contain duplicates")
+    context = EvalContext(config=config, splits=SPLITS, conditions=conditions, task_filter=task_filter)
     if not args.dry_run:
         ensure_manifests(config, splits, run_root, context)
     for family in families:

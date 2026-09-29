@@ -84,6 +84,48 @@ python run_experiment3.py run --config config.formal.json
 python run_experiment3.py summarize --run-dir runs/<run-id>
 ```
 
+## One-command OpenWAM Formal Run
+
+The formal OpenWAM protocol evaluates 50 tasks under clean and randomized
+conditions, comparing No-WM and WM on 100 valid initial states per cell. Each
+state receives one policy rollout, for 20,000 rollouts in total.
+
+Configure the machine once:
+
+```bash
+cp config.openwam.formal.template.json config.openwam.formal.json
+# Edit OpenWAM/RoboTwin/Python/checkpoint paths in config.openwam.formal.json.
+python run_experiment3.py validate --config config.openwam.formal.json
+```
+
+On a 40-GPU machine, the default launcher creates 20 isolated workers. GPUs
+0-19 run RoboTwin simulators and GPUs 20-39 host OpenWAM servers:
+
+```bash
+tmux new -s openwam-exp3
+./run_openwam_formal.sh
+```
+
+Tasks are greedily balanced using RoboTwin's official per-task step limits.
+Each worker gets a distinct model GPU, simulator GPU, port, config, log, and
+result directory. Results are checkpointed every 10 episodes. If a process or
+machine stops, run the same command again; validated batches are reused and
+only missing batches are executed.
+
+Override GPU pairs or the output directory without editing the script:
+
+```bash
+MODEL_GPUS=8-15 SIM_GPUS=0-7 RUN_DIR=/data/exp3/run_01 ./run_openwam_formal.sh
+```
+
+The launcher refuses to use missing GPUs or GPUs with more than 2 GiB already allocated.
+Set `MAX_USED_MEMORY_MIB` to change that threshold, or pass `--allow-busy-gpus` only when
+GPU sharing is intentional.
+
+Progress is printed once per minute. Final artifacts are written to
+`$RUN_DIR/summary/summary.md`, `all_results.csv`, and `status.json`. A complete
+run has 200/200 task-condition-model cells and 20,000 rollouts.
+
 The released-checkpoint smoke run only verifies the pipeline. It is not formal
 OOD evidence because those checkpoints were not trained with this 40/10 split.
 

@@ -15,16 +15,41 @@ class EvalContext:
     config: dict[str, Any]
     splits: dict[str, Path]
     conditions: dict[str, str]
+    task_filter: tuple[str, ...] | None = None
 
     def tasks(self, split: str) -> list[str]:
-        return load_tasks(self.splits[split])
+        tasks = load_tasks(self.splits[split])
+        if self.task_filter is not None:
+            invalid = [task for task in self.task_filter if task not in tasks]
+            if invalid:
+                raise ValueError(f"Tasks {invalid!r} are not in {split} split")
+            return list(self.task_filter)
+        return tasks
 
     def environment(self) -> dict[str, str]:
         env = os.environ.copy()
+        robotwin_python = self.config.get("paths", {}).get("robotwin_python")
+        if robotwin_python:
+            robotwin_prefix = Path(robotwin_python).resolve().parent.parent
+            robotwin_bin = robotwin_prefix / "bin"
+            current_path = env.get("PATH", "")
+            env["PATH"] = str(robotwin_bin) + (os.pathsep + current_path if current_path else "")
+            cuda_target = robotwin_prefix / "targets" / "x86_64-linux"
+            if cuda_target.is_dir():
+                for key, path in (
+                    ("CPATH", cuda_target / "include"),
+                    ("LIBRARY_PATH", cuda_target / "lib"),
+                ):
+                    current = env.get(key, "")
+                    env[key] = str(path) + (os.pathsep + current if current else "")
+            env.setdefault("TORCH_CUDA_ARCH_LIST", "12.0")
         matched_libs = self.config["paths"].get("matched_nvidia_libs")
         if matched_libs:
             current = env.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = str(matched_libs) + (f":{current}" if current else "")
+        vulkan_icd = self.config["paths"].get("vulkan_icd")
+        if vulkan_icd:
+            env["VK_ICD_FILENAMES"] = str(vulkan_icd)
         env["PYTHONUNBUFFERED"] = "1"
         return env
 
@@ -124,4 +149,3 @@ def python_command(config: dict[str, Any], family: str) -> list[str]:
     env_name = runtime.get("conda_env", family)
     conda = runtime.get("conda_executable", "conda")
     return [str(conda), "run", "--no-capture-output", "-n", str(env_name), "python"]
-

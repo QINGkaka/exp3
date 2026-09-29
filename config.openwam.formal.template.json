@@ -1,0 +1,41 @@
+{
+  "label": "experiment3-openwam-formal-100-states",
+  "smoke_only": false,
+  "paths": {
+    "openwam_repo": "/path/to/OpenWAM",
+    "robotwin_repo": "/path/to/RoboTwin-openwam-verified",
+    "robotwin_python": "/path/to/robotwin/bin/python",
+    "manifest_root": "manifests/100_episodes",
+    "vulkan_icd": "/etc/vulkan/icd.d/nvidia_icd.json"
+  },
+  "protocol": {
+    "episodes": 100,
+    "seed": 0,
+    "instruction_type": "unseen"
+  },
+  "runtimes": {
+    "openwam": {
+      "command": ["/path/to/openwam/bin/python"]
+    }
+  },
+  "hardware": {
+    "openwam_host": "127.0.0.1",
+    "openwam_model_gpu": 20,
+    "openwam_sim_gpu": 0,
+    "openwam_port": 8848,
+    "openwam_startup_timeout_seconds": 1200,
+    "openwam_episode_batch_size": 10
+  },
+  "models": {
+    "openwam": {
+      "no_wm": {
+        "checkpoint_dir": "/path/to/openwam-robotwin-clean40-action-only",
+        "deploy_args": ["--compile-enabled", "false"]
+      },
+      "wm": {
+        "checkpoint_dir": "/path/to/openwam-robotwin-clean40-wm-full",
+        "deploy_args": ["--compile-enabled", "false"]
+      }
+    }
+  }
+}

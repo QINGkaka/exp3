@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import signal
 import socket
 import subprocess
 import time
@@ -21,6 +23,43 @@ def _wait_for_port(host: str, port: int, process: subprocess.Popen[str], timeout
         except OSError:
             time.sleep(2)
     raise TimeoutError(f"OpenWAM server did not listen on {host}:{port} within {timeout}s")
+
+
+def _valid_part(
+    path: Path,
+    *,
+    task: str,
+    mode: str,
+    manifest_hash: str,
+    episode_start: int,
+    num_episodes: int,
+    total_episodes: int,
+) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        result = load_json(path)
+    except (OSError, ValueError):
+        return None
+    expected = {
+        "operation": "run_eval",
+        "task": task,
+        "mode": mode,
+        "manifest_hash": manifest_hash,
+        "episode_start": episode_start,
+        "num_episodes": num_episodes,
+        "total_episodes": total_episodes,
+    }
+    if any(result.get(key) != value for key, value in expected.items()):
+        return None
+    episodes = result.get("episodes")
+    if not isinstance(episodes, list) or len(episodes) != num_episodes:
+        return None
+    if [row.get("episode") for row in episodes] != list(
+        range(episode_start, episode_start + num_episodes)
+    ):
+        return None
+    return result
 
 
 class OpenWAMAdapter:
@@ -70,10 +109,16 @@ class OpenWAMAdapter:
                 stdout=server_log,
                 stderr=subprocess.STDOUT,
                 text=True,
+                start_new_session=True,
             )
             try:
-                _wait_for_port(host, port, server)
+                timeout = int(config["hardware"].get("openwam_startup_timeout_seconds", 300))
+                _wait_for_port(host, port, server, timeout=timeout)
             except Exception:
+                try:
+                    os.killpg(server.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 server_log.close()
                 raise
 
@@ -103,34 +148,89 @@ class OpenWAMAdapter:
                         })
                         robotwin_bin = str(Path(config["paths"]["robotwin_python"]).parent)
                         client_env["PATH"] = robotwin_bin + os.pathsep + client_env.get("PATH", "")
-                        command = [
-                            config["paths"]["robotwin_python"],
-                            "benchmarks/robotwin/eval_policy_wrapper.py", "labtasker",
-                            "--operation", "run_eval",
-                            "--task", task,
-                            "--mode", mode,
-                            "--policy-config", str(repo / "benchmarks/robotwin/policy_config.yml"),
-                            "--host", host,
-                            "--port", str(port),
-                            "--result-file", str(result_path),
-                            "--progress-file", str(raw_dir / "progress.json"),
-                            "--total-episodes", str(config["protocol"]["episodes"]),
-                            "--episode-start", "0",
-                            "--num-episodes", str(config["protocol"]["episodes"]),
-                            "--manifest-file", str(manifest_path),
-                            "--manifest-hash", manifest_hash,
-                            "--instruction-type", str(config["protocol"]["instruction_type"]),
-                        ]
-                        run_logged(
-                            command,
-                            cwd=repo,
-                            env=client_env,
-                            log_path=raw_dir / "driver.log",
-                            dry_run=dry_run,
-                        )
+                        total_episodes = int(config["protocol"]["episodes"])
+                        batch_size = int(config["hardware"].get("openwam_episode_batch_size", total_episodes))
+                        if batch_size <= 0:
+                            raise ValueError("hardware.openwam_episode_batch_size must be positive")
+                        parts_dir = raw_dir / "parts"
+                        parts_dir.mkdir(parents=True, exist_ok=True)
+                        part_results: list[dict[str, Any]] = []
+                        for episode_start in range(0, total_episodes, batch_size):
+                            num_episodes = min(batch_size, total_episodes - episode_start)
+                            part_path = parts_dir / f"{episode_start:05d}_{episode_start + num_episodes:05d}.json"
+                            part = None if dry_run else _valid_part(
+                                part_path,
+                                task=task,
+                                mode=mode,
+                                manifest_hash=manifest_hash,
+                                episode_start=episode_start,
+                                num_episodes=num_episodes,
+                                total_episodes=total_episodes,
+                            )
+                            if part is not None:
+                                print(
+                                    f"[openwam] resume: {method}/{task}/{mode} "
+                                    f"episodes {episode_start}:{episode_start + num_episodes}",
+                                    flush=True,
+                                )
+                                part_results.append(part)
+                                continue
+                            command = [
+                                config["paths"]["robotwin_python"],
+                                "benchmarks/robotwin/eval_policy_wrapper.py", "labtasker",
+                                "--operation", "run_eval",
+                                "--task", task,
+                                "--mode", mode,
+                                "--policy-config", str(repo / "benchmarks/robotwin/policy_config.yml"),
+                                "--host", host,
+                                "--port", str(port),
+                                "--result-file", str(part_path),
+                                "--progress-file", str(raw_dir / "progress.json"),
+                                "--total-episodes", str(total_episodes),
+                                "--episode-start", str(episode_start),
+                                "--num-episodes", str(num_episodes),
+                                "--manifest-file", str(manifest_path),
+                                "--manifest-hash", manifest_hash,
+                                "--instruction-type", str(config["protocol"]["instruction_type"]),
+                            ]
+                            run_logged(
+                                command,
+                                cwd=repo,
+                                env=client_env,
+                                log_path=raw_dir / f"driver_{episode_start:05d}.log",
+                                dry_run=dry_run,
+                            )
+                            if not dry_run:
+                                part = _valid_part(
+                                    part_path,
+                                    task=task,
+                                    mode=mode,
+                                    manifest_hash=manifest_hash,
+                                    episode_start=episode_start,
+                                    num_episodes=num_episodes,
+                                    total_episodes=total_episodes,
+                                )
+                                if part is None:
+                                    raise RuntimeError(f"Invalid OpenWAM batch result: {part_path}")
+                                part_results.append(part)
                         if not dry_run:
-                            result = load_json(result_path)
-                            rows[task][condition] = int(result["successes"]) / int(result["num_episodes"])
+                            episodes = [row for part in part_results for row in part["episodes"]]
+                            result = {
+                                "operation": "run_eval",
+                                "instruction_type": str(config["protocol"]["instruction_type"]),
+                                "task": task,
+                                "mode": mode,
+                                "episode_start": 0,
+                                "num_episodes": total_episodes,
+                                "total_episodes": total_episodes,
+                                "manifest_hash": manifest_hash,
+                                "successes": sum(bool(row["success"]) for row in episodes),
+                                "episodes": episodes,
+                            }
+                            result_path.write_text(
+                                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+                            )
+                            rows[task][condition] = int(result["successes"]) / total_episodes
                 if not dry_run:
                     self.context.write_result(
                         output_dir,
@@ -142,11 +242,17 @@ class OpenWAMAdapter:
                     )
         finally:
             if server is not None:
-                server.terminate()
+                try:
+                    os.killpg(server.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     server.wait(timeout=15)
                 except subprocess.TimeoutExpired:
-                    server.kill()
+                    try:
+                        os.killpg(server.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     server.wait()
             if server_log is not None:
                 server_log.close()
