@@ -5,6 +5,8 @@ __pycache__/
 
 config.formal.json
 config.smoke.json
+config.openwam.formal.json
+config.openwam.smoke4.json
 manifests/
 runs/
 

@@ -84,7 +84,21 @@ python run_experiment3.py run --config config.formal.json
 python run_experiment3.py summarize --run-dir runs/<run-id>
 ```
 
-## One-command OpenWAM Formal Run
+## One-command OpenWAM Runs
+
+Both launchers cover all 50 tasks, clean and randomized conditions, and the
+No-WM and WM checkpoints. Each initial state receives one policy rollout.
+
+Run the 4-state smoke protocol first (800 rollouts):
+
+```bash
+cp config.openwam.smoke4.template.json config.openwam.smoke4.json
+# Edit OpenWAM/RoboTwin/Python/checkpoint paths in config.openwam.smoke4.json.
+python run_experiment3.py validate --config config.openwam.smoke4.json
+./run_openwam_smoke4.sh
+```
+
+The formal protocol uses 100 states per cell (20,000 rollouts):
 
 The formal OpenWAM protocol evaluates 50 tasks under clean and randomized
 conditions, comparing No-WM and WM on 100 valid initial states per cell. Each
@@ -98,8 +112,8 @@ cp config.openwam.formal.template.json config.openwam.formal.json
 python run_experiment3.py validate --config config.openwam.formal.json
 ```
 
-On a 40-GPU machine, the default launcher creates 20 isolated workers. GPUs
-0-19 run RoboTwin simulators and GPUs 20-39 host OpenWAM servers:
+On a 40-GPU machine, both launchers create 20 isolated workers by default.
+GPUs 0-19 run RoboTwin simulators and GPUs 20-39 host OpenWAM servers:
 
 ```bash
 tmux new -s openwam-exp3
@@ -117,6 +131,10 @@ Override GPU pairs or the output directory without editing the script:
 ```bash
 MODEL_GPUS=8-15 SIM_GPUS=0-7 RUN_DIR=/data/exp3/run_01 ./run_openwam_formal.sh
 ```
+
+Use the same overrides with `run_openwam_smoke4.sh` on smaller machines. The
+smoke and formal defaults use separate manifest and result directories, so
+their outputs cannot be mixed accidentally.
 
 The launcher refuses to use missing GPUs or GPUs with more than 2 GiB already allocated.
 Set `MAX_USED_MEMORY_MIB` to change that threshold, or pass `--allow-busy-gpus` only when

@@ -289,6 +289,7 @@ def main() -> int:
     parser.add_argument("--sim-gpus", type=parse_gpus, default=parse_gpus("0-19"))
     parser.add_argument("--port-base", type=int, default=8848)
     parser.add_argument("--max-used-memory-mib", type=int, default=2048)
+    parser.add_argument("--expected-episodes", type=int, default=100)
     parser.add_argument("--allow-busy-gpus", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -301,8 +302,11 @@ def main() -> int:
     base = resolve_config_paths(load_json(config_path), config_path)
     if set(base.get("models", {})) != {"openwam"}:
         parser.error("formal launcher requires an OpenWAM-only config")
-    if int(base["protocol"]["episodes"]) != 100:
-        parser.error("formal protocol requires protocol.episodes=100")
+    episodes = int(base["protocol"]["episodes"])
+    if episodes != args.expected_episodes:
+        parser.error(
+            f"config has protocol.episodes={episodes}, expected {args.expected_episodes}"
+        )
     validate(base)
 
     if not args.dry_run:
@@ -345,7 +349,8 @@ def main() -> int:
     (run_root / "plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     print(
         f"[formal] start={datetime.now().astimezone().isoformat()} workers={len(plan)} "
-        f"tasks=50 states=100 conditions=2 models=2 rollouts=20000 run={run_root}",
+        f"tasks=50 states={episodes} conditions=2 models=2 "
+        f"rollouts={len(all_tasks) * len(CONDITIONS) * 2 * episodes} run={run_root}",
         flush=True,
     )
     for item in plan:
@@ -361,7 +366,9 @@ def main() -> int:
     threads = []
     start_monotonic = time.monotonic()
     batch_size = int(base["hardware"].get("openwam_episode_batch_size", 100))
-    expected_batches = len(all_tasks) * len(CONDITIONS) * 2 * math.ceil(100 / batch_size)
+    expected_batches = (
+        len(all_tasks) * len(CONDITIONS) * 2 * math.ceil(episodes / batch_size)
+    )
 
     def launch(index: int, tasks: list[str]) -> None:
         statuses[index] = worker_main(
@@ -404,7 +411,7 @@ def main() -> int:
         print(f"[formal] failed workers={failed}; rerun the same command to resume", file=sys.stderr)
         return 1
     if not args.dry_run:
-        summarize(run_root, all_tasks, int(base["protocol"]["episodes"]))
+        summarize(run_root, all_tasks, episodes)
     print(f"[formal] finished={datetime.now().astimezone().isoformat()}", flush=True)
     return 0
 

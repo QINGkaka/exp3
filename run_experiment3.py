@@ -247,26 +247,25 @@ def main() -> None:
     run_root = args.run_dir.resolve() if args.run_dir else (
         RUNS_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
     )
+    families = list(config["models"]) if args.family == "all" else [args.family]
     run_root.mkdir(parents=True, exist_ok=True)
     (run_root / "config.json").write_text(
         json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    repositories = [git_revision(Path(config["paths"]["robotwin_repo"]))]
+    for family in families:
+        repositories.append(git_revision(Path(config["paths"][f"{family}_repo"])))
     metadata = {
         "created_at": datetime.now().astimezone().isoformat(),
         "label": config["label"], "smoke_only": config["smoke_only"],
         "protocol": config["protocol"], "hardware": config["hardware"],
         "task_files": {key: str(value) for key, value in SPLITS.items()},
-        "repositories": [
-            git_revision(Path(config["paths"]["fastwam_repo"])),
-            git_revision(Path(config["paths"]["openwam_repo"])),
-            git_revision(Path(config["paths"]["robotwin_repo"])),
-        ],
+        "repositories": repositories,
     }
     (run_root / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    families = list(config["models"]) if args.family == "all" else [args.family]
     splits = list(SPLITS) if args.split == "all" else [args.split]
     conditions = CONDITIONS if args.condition == "all" else {args.condition: CONDITIONS[args.condition]}
     task_filter = None
