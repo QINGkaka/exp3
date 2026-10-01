@@ -2,9 +2,7 @@ diff --git a/benchmarks/robotwin/openwam2robotwin_interface.py b/benchmarks/robo
 index df0e31d..abdda74 100644
 --- a/benchmarks/robotwin/openwam2robotwin_interface.py
 +++ b/benchmarks/robotwin/openwam2robotwin_interface.py
-@@ -222,3 +222,5 @@ class ModelClient:
-         self._debug_dir = debug_dir
-         self._episode = -1  # incremented to 0 on the first reset_model() call
+@@ -224,1 +224,3 @@ class ModelClient:
          self._step = 0
 +        sample_seed = os.environ.get("ROBOTWIN_POLICY_SAMPLE_SEED", "").strip()
 +        self._sample_seed = int(sample_seed) if sample_seed else None
