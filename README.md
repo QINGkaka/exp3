@@ -86,6 +86,33 @@ python run_experiment3.py summarize --run-dir runs/<run-id>
 
 ## One-command OpenWAM Runs
 
+### Experiment 3 selected-task protocol
+
+The current Experiment 3 protocol evaluates the five tasks in
+`tasks/seen_5_exp3.txt` and all ten tasks in `tasks/unseen_10.txt`. For every
+task and condition, it replays 10 fixed manifest states 32 times with distinct,
+deterministic policy-sampling seeds. No-WM and WM use paired seeds for the same
+task, condition, state, and rollout index.
+
+This is `15 tasks x 2 conditions x 2 methods x 10 states x 32 rollouts = 19,200`
+rollouts. Set `protocol.episodes` to 10 and `protocol.rollouts_per_state` to 32;
+setting episodes to 320 is not equivalent because that generates 320 different
+initial states. Start from `config.openwam.exp3_15tasks.template.json`.
+
+With `run_openwam_remote_formal.py --dynamic-pool`, repeated-rollout jobs are
+scheduled at `(task, condition, state)` granularity. Each simulator worker runs
+the 32 rollouts for one fixed state, then immediately claims another state.
+Every rollout is stored as an immutable `sNNN_rNNN.json` part, so rerunning the
+same command validates and resumes completed work.
+
+Apply both `patches/openwam-session-isolation.patch` and
+`patches/openwam-policy-sampling-seed.patch` to the OpenWAM checkout. The latter
+propagates the recorded rollout seed through the client request into diffusion
+sampling; without it, repeated rollouts do not implement the intended sampling
+protocol.
+
+### Legacy all-task benchmark
+
 Both launchers cover all 50 tasks, clean and randomized conditions, and the
 No-WM and WM checkpoints. Each initial state receives one policy rollout.
 

@@ -112,7 +112,10 @@ def remote_command(
     return ["ssh", *ssh_control_args(control_path), remote_host, shlex.join(command)]
 
 
-def copy_existing_parts(run_root: Path, worker: int, split: str, tasks: list[str], method: str) -> int:
+def copy_existing_parts(
+    run_root: Path, worker: int, split: str, tasks: list[str], method: str,
+    *, state: int | None = None,
+) -> int:
     """Reuse valid immutable part files even when an 8-worker plan reassigns a task."""
     copied = 0
     for task in tasks:
@@ -121,8 +124,9 @@ def copy_existing_parts(run_root: Path, worker: int, split: str, tasks: list[str
                 run_root / f"worker_{worker:02d}" / split / "openwam" / method / split
                 / "raw" / task / mode / "parts"
             )
+            pattern = f"s{state:03d}_r*.json" if state is not None else "*.json"
             sources = run_root.glob(
-                f"worker_*/{split}/openwam/{method}/{split}/raw/{task}/{mode}/parts/*.json"
+                f"worker_*/{split}/openwam/{method}/{split}/raw/{task}/{mode}/parts/{pattern}"
             )
             for source in sources:
                 target = destination / source.name
@@ -141,11 +145,13 @@ def copy_existing_parts(run_root: Path, worker: int, split: str, tasks: list[str
 
 
 def write_worker_config(
-    base: dict[str, Any], path: Path, *, sim_gpu: int, port: int, worker: int, episodes: int
+    base: dict[str, Any], path: Path, *, sim_gpu: int, port: int, worker: int,
+    episodes: int, rollouts_per_state: int
 ) -> None:
     config = deepcopy(base)
     config["label"] = f"{base['label']}-remote-worker-{worker:02d}"
     config["protocol"]["episodes"] = episodes
+    config["protocol"]["rollouts_per_state"] = rollouts_per_state
     config["hardware"].update(
         openwam_host="127.0.0.1",
         openwam_port=port,
@@ -188,6 +194,10 @@ def main() -> int:
     )
     parser.add_argument("--tasks", help="Optional comma-separated task subset for smoke tests")
     parser.add_argument("--episodes", type=int)
+    parser.add_argument(
+        "--rollouts-per-state", type=int,
+        help="Repeat each fixed manifest state this many times with distinct policy seeds",
+    )
     parser.add_argument("--startup-timeout", type=int, default=1200)
     parser.add_argument("--no-sync-server", action="store_true")
     parser.add_argument(
@@ -201,6 +211,8 @@ def main() -> int:
         parser.error("--remote-gpus and --sim-gpus must have equal lengths")
     if args.episodes is not None and args.episodes <= 0:
         parser.error("--episodes must be positive")
+    if args.rollouts_per_state is not None and args.rollouts_per_state <= 0:
+        parser.error("--rollouts-per-state must be positive")
     if args.clients_per_server <= 0:
         parser.error("--clients-per-server must be positive")
     if args.servers_per_gpu <= 0:
@@ -210,6 +222,9 @@ def main() -> int:
     base = resolve_config_paths(load_json(config_path), config_path)
     validate(base)
     episodes = args.episodes or int(base["protocol"]["episodes"])
+    rollouts_per_state = args.rollouts_per_state or int(
+        base["protocol"].get("rollouts_per_state", 1)
+    )
     all_tasks = load_tasks(ROOT / "tasks/all_50.txt")
     tasks = all_tasks
     if args.tasks:
@@ -253,7 +268,7 @@ def main() -> int:
         config_path_out = config_root / f"worker_{index:02d}.json"
         write_worker_config(
             base, config_path_out, sim_gpu=server["sim_gpu"], port=port,
-            worker=index, episodes=episodes,
+            worker=index, episodes=episodes, rollouts_per_state=rollouts_per_state,
         )
         plan.append({
             "worker": index,
@@ -272,7 +287,8 @@ def main() -> int:
     print(
         f"[remote-formal] servers={len(servers)} servers_per_gpu={args.servers_per_gpu} "
         f"clients_per_server={args.clients_per_server} "
-        f"workers={len(plan)} tasks={len(tasks)} episodes={episodes} "
+        f"workers={len(plan)} tasks={len(tasks)} states={episodes} "
+        f"rollouts_per_state={rollouts_per_state} "
         f"methods={','.join(methods)} run={run_root}", flush=True,
     )
     if args.dry_run:
@@ -403,17 +419,27 @@ def main() -> int:
                 if args.dynamic_pool:
                     split_tasks = split_for_tasks(tasks).get(split, [])
                     conditions = list(CONDITIONS) if args.condition == "all" else [args.condition]
+                    state_sharded = rollouts_per_state > 1
                     pending = sorted(
-                        [(task, condition) for task in split_tasks for condition in conditions],
+                        [
+                            (task, condition, state)
+                            for task in split_tasks
+                            for condition in conditions
+                            for state in (range(episodes) if state_sharded else [None])
+                        ],
                         key=lambda job: (-limits.get(job[0], 1000), job[0], job[1]),
                     )
                     available = list(plan)
-                    active: dict[int, tuple[subprocess.Popen, str, str]] = {}
+                    active: dict[int, tuple[subprocess.Popen, str, str, int | None]] = {}
                     worker_logs: dict[int, Any] = {}
 
-                    def launch_job(item: dict[str, Any], task: str, condition: str) -> None:
+                    def launch_job(
+                        item: dict[str, Any], task: str, condition: str, state: int | None
+                    ) -> None:
                         worker = item["worker"]
-                        copied = copy_existing_parts(run_root, worker, split, [task], method)
+                        copied = copy_existing_parts(
+                            run_root, worker, split, [task], method, state=state
+                        )
                         if copied:
                             print(
                                 f"[remote-formal] W{worker:02d} reused {copied} existing part(s)",
@@ -442,12 +468,18 @@ def main() -> int:
                             stderr=subprocess.STDOUT,
                             text=True,
                             start_new_session=True,
+                            env=(
+                                os.environ.copy()
+                                if state is None
+                                else {**os.environ, "EXP3_STATE_INDEX": str(state)}
+                            ),
                         )
                         workers.append((worker, process, worker_logs[worker]))
-                        active[worker] = (process, task, condition)
+                        active[worker] = (process, task, condition, state)
+                        state_label = "" if state is None else f"/state={state}"
                         print(
                             f"[remote-pool] {method}/{split} W{worker:02d} START "
-                            f"{task}/{condition} pending={len(pending)}",
+                            f"{task}/{condition}{state_label} pending={len(pending)}",
                             flush=True,
                         )
 
@@ -465,18 +497,19 @@ def main() -> int:
                             )
 
                         finished = []
-                        for worker, (process, task, condition) in active.items():
+                        for worker, (process, task, condition, state) in active.items():
                             returncode = process.poll()
                             if returncode is None:
                                 continue
+                            state_label = "" if state is None else f"/state={state}"
                             if returncode:
                                 raise RuntimeError(
                                     f"{method}/{split} W{worker:02d} failed "
-                                    f"{task}/{condition} with {returncode}"
+                                    f"{task}/{condition}{state_label} with {returncode}"
                                 )
                             print(
                                 f"[remote-pool] {method}/{split} W{worker:02d} DONE "
-                                f"{task}/{condition}",
+                                f"{task}/{condition}{state_label}",
                                 flush=True,
                             )
                             finished.append(worker)
@@ -487,15 +520,18 @@ def main() -> int:
                         available.sort(key=lambda item: item["worker"])
                         while pending and available:
                             item = available.pop(0)
-                            task, condition = pending.pop(0)
-                            launch_job(item, task, condition)
+                            task, condition, state = pending.pop(0)
+                            launch_job(item, task, condition, state)
 
                         now = time.monotonic()
                         if now - last_heartbeat >= 60:
                             last_heartbeat = now
                             running = {
-                                worker: f"{task}/{condition}"
-                                for worker, (_, task, condition) in active.items()
+                                worker: (
+                                    f"{task}/{condition}"
+                                    + ("" if state is None else f"/state={state}")
+                                )
+                                for worker, (_, task, condition, state) in active.items()
                             }
                             print(
                                 f"[remote-pool] {method}/{split} active={running} "
@@ -580,6 +616,7 @@ def main() -> int:
     if (
         tasks == all_tasks
         and episodes == int(base["protocol"]["episodes"])
+        and rollouts_per_state == 1
         and args.condition == "all"
         and methods == ["no_wm", "wm"]
     ):

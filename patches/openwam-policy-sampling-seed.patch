@@ -1,0 +1,56 @@
+diff --git a/benchmarks/robotwin/openwam2robotwin_interface.py b/benchmarks/robotwin/openwam2robotwin_interface.py
+index df0e31d..abdda74 100644
+--- a/benchmarks/robotwin/openwam2robotwin_interface.py
++++ b/benchmarks/robotwin/openwam2robotwin_interface.py
+@@ -222,3 +222,5 @@ class ModelClient:
+         self._debug_dir = debug_dir
+         self._episode = -1  # incremented to 0 on the first reset_model() call
+         self._step = 0
++        sample_seed = os.environ.get("ROBOTWIN_POLICY_SAMPLE_SEED", "").strip()
++        self._sample_seed = int(sample_seed) if sample_seed else None
+@@ -230,5 +232,6 @@ class ModelClient:
+             f"[OpenWAMClient] server={self._ws_url} send_state={send_state} "
+             f"state_dim={state_dim} "
+             f"request_timeout={request_timeout}s action_type={action_type} "
+-            f"action_indices={action_indices} debug={debug} debug_dir={debug_dir}"
++            f"action_indices={action_indices} sample_seed={self._sample_seed} "
++            f"debug={debug} debug_dir={debug_dir}"
+         )
+@@ -360,6 +363,9 @@ class ModelClient:
+             right_wrist=client.encode_numpy_b64(cams["right"]) if cams.get("right") is not None else None,
+             prompt=prompt,
+             state=state_list,
++            # Vary diffusion noise at every possible chunk boundary while keeping
++            # the sequence reproducible for this rollout.
++            seed=None if self._sample_seed is None else self._sample_seed + self._step,
+         )
+         response = self._client.predict(payload)
+         action = np.array(response["action"], dtype=np.float32)
+diff --git a/benchmarks/utils/client.py b/benchmarks/utils/client.py
+index f8960a7..06620fb 100644
+--- a/benchmarks/utils/client.py
++++ b/benchmarks/utils/client.py
+@@ -126,4 +126,5 @@ def build_payload(
+     right_wrist: Optional[str] = None,
+     prompt: str = "",
+     state: Optional[list] = None,
++    seed: Optional[int] = None,
+ ) -> dict:
+@@ -143,4 +144,6 @@ def build_payload(
+     }
+     if state is not None:
+         payload["state"] = list(state)
++    if seed is not None:
++        payload["seed"] = int(seed)
+     return payload
+diff --git a/openwam/deploy/policy.py b/openwam/deploy/policy.py
+index 134ca46..48ccb7c 100644
+--- a/openwam/deploy/policy.py
++++ b/openwam/deploy/policy.py
+@@ -99,4 +99,6 @@ class WAMPolicy:
+             conditions["prompt"] = obs["prompt"]
+         if "state" in obs and obs["state"] is not None:
+             conditions["proprio"] = obs["state"]
++        if "seed" in obs and obs["seed"] is not None:
++            conditions["seed"] = int(obs["seed"])
+         return conditions

@@ -1,0 +1,6 @@
+# Experiment 3 seen-task subset selected from the ranked task list.
+place_a2b_left
+place_can_basket
+place_phone_stand
+place_shoe
+pick_dual_bottles

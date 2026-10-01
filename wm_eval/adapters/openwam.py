@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import signal
 import socket
@@ -34,6 +35,8 @@ def _valid_part(
     episode_start: int,
     num_episodes: int,
     total_episodes: int,
+    rollout_index: int | None = None,
+    policy_sample_seed: int | None = None,
 ) -> dict[str, Any] | None:
     if not path.is_file():
         return None
@@ -52,6 +55,10 @@ def _valid_part(
     }
     if any(result.get(key) != value for key, value in expected.items()):
         return None
+    if rollout_index is not None and result.get("rollout_index") != rollout_index:
+        return None
+    if policy_sample_seed is not None and result.get("policy_sample_seed") != policy_sample_seed:
+        return None
     episodes = result.get("episodes")
     if not isinstance(episodes, list) or len(episodes) != num_episodes:
         return None
@@ -60,6 +67,18 @@ def _valid_part(
     ):
         return None
     return result
+
+
+def _policy_sample_seed(task: str, mode: str, state: int, rollout: int) -> int:
+    """Pair no-WM/WM evaluations with the same deterministic sampling seed."""
+    key = f"experiment3:{task}:{mode}:{state}:{rollout}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(key).digest()[:4], "big") & 0x7FFFFFFF
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
 
 
 class OpenWAMAdapter:
@@ -158,15 +177,54 @@ class OpenWAMAdapter:
                         robotwin_bin = str(Path(config["paths"]["robotwin_python"]).parent)
                         client_env["PATH"] = robotwin_bin + os.pathsep + client_env.get("PATH", "")
                         total_episodes = int(config["protocol"]["episodes"])
+                        rollouts_per_state = int(
+                            config["protocol"].get("rollouts_per_state", 1)
+                        )
+                        if rollouts_per_state <= 0:
+                            raise ValueError("protocol.rollouts_per_state must be positive")
                         batch_size = int(config["hardware"].get("openwam_episode_batch_size", total_episodes))
                         if batch_size <= 0:
                             raise ValueError("hardware.openwam_episode_batch_size must be positive")
                         parts_dir = raw_dir / "parts"
                         parts_dir.mkdir(parents=True, exist_ok=True)
                         part_results: list[dict[str, Any]] = []
-                        for episode_start in range(0, total_episodes, batch_size):
-                            num_episodes = min(batch_size, total_episodes - episode_start)
-                            part_path = parts_dir / f"{episode_start:05d}_{episode_start + num_episodes:05d}.json"
+                        repeated_rollouts = rollouts_per_state > 1
+                        state_override = os.environ.get("EXP3_STATE_INDEX")
+                        selected_states = (
+                            [int(state_override)]
+                            if state_override is not None
+                            else list(range(total_episodes))
+                        )
+                        if any(state < 0 or state >= total_episodes for state in selected_states):
+                            raise ValueError(
+                                f"EXP3_STATE_INDEX must be in [0, {total_episodes})"
+                            )
+                        jobs = (
+                            [
+                                (state, 1, rollout)
+                                for state in selected_states
+                                for rollout in range(rollouts_per_state)
+                            ]
+                            if repeated_rollouts
+                            else [
+                                (
+                                    episode_start,
+                                    min(batch_size, total_episodes - episode_start),
+                                    None,
+                                )
+                                for episode_start in range(0, total_episodes, batch_size)
+                            ]
+                        )
+                        for episode_start, num_episodes, rollout_index in jobs:
+                            if rollout_index is None:
+                                part_name = f"{episode_start:05d}_{episode_start + num_episodes:05d}.json"
+                                sample_seed = None
+                            else:
+                                part_name = f"s{episode_start:03d}_r{rollout_index:03d}.json"
+                                sample_seed = _policy_sample_seed(
+                                    task, mode, episode_start, rollout_index
+                                )
+                            part_path = parts_dir / part_name
                             part = None if dry_run else _valid_part(
                                 part_path,
                                 task=task,
@@ -175,11 +233,17 @@ class OpenWAMAdapter:
                                 episode_start=episode_start,
                                 num_episodes=num_episodes,
                                 total_episodes=total_episodes,
+                                rollout_index=rollout_index,
+                                policy_sample_seed=sample_seed,
                             )
                             if part is not None:
+                                resume_detail = (
+                                    f"state={episode_start} rollout={rollout_index}"
+                                    if rollout_index is not None
+                                    else f"episodes {episode_start}:{episode_start + num_episodes}"
+                                )
                                 print(
-                                    f"[openwam] resume: {method}/{task}/{mode} "
-                                    f"episodes {episode_start}:{episode_start + num_episodes}",
+                                    f"[openwam] resume: {method}/{task}/{mode} {resume_detail}",
                                     flush=True,
                                 )
                                 part_results.append(part)
@@ -202,14 +266,38 @@ class OpenWAMAdapter:
                                 "--manifest-hash", manifest_hash,
                                 "--instruction-type", str(config["protocol"]["instruction_type"]),
                             ]
+                            invocation_env = client_env.copy()
+                            if sample_seed is not None:
+                                invocation_env["ROBOTWIN_POLICY_SAMPLE_SEED"] = str(sample_seed)
+                                invocation_env["ROBOTWIN_TRACE_METHOD"] = method
+                                invocation_env["ROBOTWIN_TRACE_ROLLOUT"] = str(rollout_index)
                             run_logged(
                                 command,
                                 cwd=repo,
-                                env=client_env,
-                                log_path=raw_dir / f"driver_{episode_start:05d}.log",
+                                env=invocation_env,
+                                log_path=(
+                                    raw_dir / f"driver_s{episode_start:03d}_r{rollout_index:03d}.log"
+                                    if rollout_index is not None
+                                    else raw_dir / f"driver_{episode_start:05d}.log"
+                                ),
                                 dry_run=dry_run,
                             )
                             if not dry_run:
+                                if rollout_index is not None:
+                                    raw_part = load_json(part_path)
+                                    for row in raw_part.get("episodes", []):
+                                        row.update({
+                                            "state_index": episode_start,
+                                            "rollout_index": rollout_index,
+                                            "policy_sample_seed": sample_seed,
+                                        })
+                                    raw_part.update({
+                                        "state_index": episode_start,
+                                        "rollout_index": rollout_index,
+                                        "policy_sample_seed": sample_seed,
+                                        "rollouts_per_state": rollouts_per_state,
+                                    })
+                                    _write_json_atomic(part_path, raw_part)
                                 part = _valid_part(
                                     part_path,
                                     task=task,
@@ -218,6 +306,8 @@ class OpenWAMAdapter:
                                     episode_start=episode_start,
                                     num_episodes=num_episodes,
                                     total_episodes=total_episodes,
+                                    rollout_index=rollout_index,
+                                    policy_sample_seed=sample_seed,
                                 )
                                 if part is None:
                                     raise RuntimeError(f"Invalid OpenWAM batch result: {part_path}")
@@ -230,8 +320,10 @@ class OpenWAMAdapter:
                                 "task": task,
                                 "mode": mode,
                                 "episode_start": 0,
-                                "num_episodes": total_episodes,
+                                "num_episodes": len(episodes),
                                 "total_episodes": total_episodes,
+                                "states": total_episodes,
+                                "rollouts_per_state": rollouts_per_state,
                                 "manifest_hash": manifest_hash,
                                 "successes": sum(bool(row["success"]) for row in episodes),
                                 "episodes": episodes,
@@ -239,7 +331,7 @@ class OpenWAMAdapter:
                             result_path.write_text(
                                 json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
                             )
-                            rows[task][condition] = int(result["successes"]) / total_episodes
+                            rows[task][condition] = int(result["successes"]) / len(episodes)
                 if not dry_run:
                     self.context.write_result(
                         output_dir,

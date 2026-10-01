@@ -50,17 +50,19 @@ def read_progress(
     latest_mtime = -1.0
 
     committed_ranges: dict[tuple[str, str, str, str], set[tuple[int, int]]] = defaultdict(set)
-    committed_parts: set[tuple[str, str, str, str, int, int]] = set()
+    committed_parts: set[tuple[str, str, str, str, int, int, int | None]] = set()
     for path in run_dir.glob("worker_*/**/parts/*.json"):
         try:
             data = json.loads(path.read_text())
             count = int(data.get("num_episodes", 0))
             start = int(data.get("episode_start", 0))
+            rollout = data.get("rollout_index")
+            rollout = int(rollout) if rollout is not None else None
             mtime = path.stat().st_mtime
             identity = result_identity(path.parent.parent / "progress.json")
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             continue
-        part_identity = (*identity, start, start + count)
+        part_identity = (*identity, start, start + count, rollout)
         if part_identity in committed_parts:
             continue
         committed_parts.add(part_identity)
@@ -98,19 +100,21 @@ def read_progress(
 
 
 def committed_before(run_dir: Path, cutoff: float) -> int:
-    committed: dict[tuple[str, str, str, str, int, int], float] = {}
+    committed: dict[tuple[str, str, str, str, int, int, int | None], float] = {}
     for path in run_dir.glob("worker_*/**/parts/*.json"):
         try:
             data = json.loads(path.read_text())
             count = int(data.get("num_episodes", 0))
             start = int(data.get("episode_start", 0))
+            rollout = data.get("rollout_index")
+            rollout = int(rollout) if rollout is not None else None
             identity = result_identity(path.parent.parent / "progress.json")
             mtime = path.stat().st_mtime
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             continue
-        key = (*identity, start, start + count)
+        key = (*identity, start, start + count, rollout)
         committed[key] = min(mtime, committed.get(key, mtime))
-    return sum(key[-1] - key[-2] for key, mtime in committed.items() if mtime < cutoff)
+    return sum(key[-2] - key[-3] for key, mtime in committed.items() if mtime < cutoff)
 
 
 def main() -> int:
