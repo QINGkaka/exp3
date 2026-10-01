@@ -1,0 +1,261 @@
+diff --git a/openwam/deploy/server.py b/openwam/deploy/server.py
+--- a/openwam/deploy/server.py
++++ b/openwam/deploy/server.py
+@@ -75,6 +75,25 @@
+ MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+ 
+ 
++class PolicySession:
++    """Per-connection policy state backed by the server's shared model engine."""
++
++    def __init__(self, policy):
++        self.policy = policy
++        self.request_count = 0
++        self.total_latency = 0.0
++        self.initialized = False
++
++    def reset(self) -> None:
++        self.policy.reset()
++        self.request_count = 0
++        self.total_latency = 0.0
++        self.initialized = True
++
++    def shutdown(self) -> None:
++        self.policy.shutdown()
++
++
+ def _infer_video_num_frames(dl) -> int:
+     """Return the video frame count seen by Wan after dataloader sub-sampling."""
+     from omegaconf import OmegaConf
+@@ -127,10 +146,18 @@
+         cfg: Config with policy and server settings.
+     """
+ 
+-    def __init__(self, engine, cfg, readiness_token: str | None = None):
++    def __init__(
++        self,
++        engine,
++        cfg,
++        readiness_token: str | None = None,
++        *,
++        session_isolation: bool = False,
++    ):
+         self.engine = engine
+         self.cfg = cfg
+         self.readiness_token = readiness_token
++        self.session_isolation = session_isolation
+ 
+         # Lazy imports at init time to validate availability
+         self._policy = None
+@@ -146,6 +173,9 @@
+         from openwam.deploy.policy import WAMPolicy
+ 
+         execution_config = resolve_execution_config(self.cfg)
++        if self.session_isolation and execution_config.enabled:
++            raise ValueError("Session isolation requires the synchronous executor")
++        self._execution_config = execution_config
+         self._policy = WAMPolicy(
+             engine=self.engine,
+             cfg=self.cfg,
+@@ -164,6 +194,19 @@
+             d.img_width,
+         )
+ 
++    def new_session(self) -> PolicySession:
++        """Create isolated rollout state while retaining the shared model engine."""
++        self._init_policy()
++        from openwam.deploy.policy import WAMPolicy
++
++        return PolicySession(
++            WAMPolicy(
++                engine=self.engine,
++                cfg=self.cfg,
++                execution_config=self._execution_config,
++            )
++        )
++
+     def _ckpt_contract(self) -> dict:
+         """Representation-contract fields advertised in the PONG for client-side validation.
+ 
+@@ -186,7 +229,7 @@
+             result["readiness_token"] = self.readiness_token
+         return result
+ 
+-    def predict(self, obs: dict) -> dict:
++    def predict(self, obs: dict, *, session: Optional[PolicySession] = None) -> dict:
+         """Synchronous prediction for a single observation.
+ 
+         Args:
+@@ -202,18 +245,27 @@
+             "step", "latency_ms".
+         """
+         self._init_policy()
++        if session is not None and not session.initialized:
++            raise ValueError("A new session must reset before its first observation")
+         t0 = time.monotonic()
+ 
+         obs = self._obs_preprocessor.preprocess(obs)
+-        action = self._policy.predict_action(obs)
++        policy = session.policy if session is not None else self._policy
++        action = policy.predict_action(obs)
+ 
+         latency_ms = (time.monotonic() - t0) * 1000
+-        self._request_count += 1
+-        self._total_latency += latency_ms
++        if session is None:
++            self._request_count += 1
++            self._total_latency += latency_ms
++            step = self._request_count
++        else:
++            session.request_count += 1
++            session.total_latency += latency_ms
++            step = session.request_count
+ 
+         return {
+             "action": action.tolist(),
+-            "step": self._request_count,
++            "step": step,
+             "latency_ms": round(latency_ms, 2),
+         }
+ 
+@@ -246,6 +298,7 @@
+         async def ws_handler(websocket):
+             """Handle WebSocket connections."""
+             logger.info("Client connected: %s", websocket.remote_address)
++            session = self.new_session() if self.session_isolation else None
+             try:
+                 async for message in websocket:
+                     try:
+@@ -253,10 +306,13 @@
+                         msg_type = data.get("type", OBS)
+ 
+                         if msg_type == RESET:
+-                            self.reset()
++                            if session is None:
++                                self.reset()
++                            else:
++                                session.reset()
+                             await websocket.send(json.dumps({"type": RESET_ACK}))
+                         elif msg_type == OBS:
+-                            result = self.predict(data)
++                            result = self.predict(data, session=session)
+                             result["type"] = ACTION
+                             await websocket.send(json.dumps(result))
+                         elif msg_type == PING:
+@@ -297,6 +353,9 @@
+                         )
+             except websockets.exceptions.ConnectionClosed:
+                 logger.info("Client disconnected")
++            finally:
++                if session is not None:
++                    session.shutdown()
+ 
+         async def serve():
+             # ping_interval=None: slow inference (notably torch.compile warmup on
+@@ -469,6 +528,11 @@
+     parser.add_argument("--port", type=int, default=None, help="WebSocket port override.")
+     parser.add_argument("--readiness-token", help=argparse.SUPPRESS)
+     parser.add_argument(
++        "--session-isolation",
++        action="store_true",
++        help="Isolate each WebSocket's action buffer and RESET while sharing one model.",
++    )
++    parser.add_argument(
+         "--denoise-steps",
+         type=int,
+         default=None,
+@@ -685,6 +749,7 @@
+         ckpt_name=args.ckpt_name,
+         readiness_token=args.readiness_token,
+     )
++    server.session_isolation = args.session_isolation
+     logging.getLogger("deploy").info(
+         "Inference engine ready — steps=%d denoise_mode=%s",
+         OmegaConf.select(server.cfg, "inference.denoise_steps", default=20),
+diff --git a/tests/test_server_session_isolation.py b/tests/test_server_session_isolation.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_server_session_isolation.py
+@@ -0,0 +1,82 @@
++from types import SimpleNamespace
++from unittest.mock import patch
++
++import numpy as np
++import pytest
++
++from openwam.deploy.server import PolicyServer
++
++
++class FakePolicy:
++    def __init__(self, engine, cfg, execution_config=None):
++        del engine, cfg, execution_config
++        self.value = 0
++        self.shutdown_called = False
++
++    def predict_action(self, obs):
++        del obs
++        self.value += 1
++        return np.asarray([self.value], dtype=np.float32)
++
++    def reset(self):
++        self.value = 0
++
++    def shutdown(self):
++        self.shutdown_called = True
++
++
++class IdentityPreprocessor:
++    @classmethod
++    def from_cfg(cls, cfg, engine):
++        del cfg, engine
++        return cls()
++
++    multiview = False
++    camera_layout = []
++    img_height = 1
++    img_width = 1
++
++    def preprocess(self, obs):
++        return obs
++
++
++def execution_config(*, enabled=False):
++    return SimpleNamespace(enabled=enabled, inference_horizon=1, inference_delay_steps=0)
++
++
++@patch("openwam.deploy.obs_preprocess.ObsPreprocessor.from_cfg", IdentityPreprocessor.from_cfg)
++@patch("openwam.deploy.policy.WAMPolicy", FakePolicy)
++@patch("openwam.deploy.executors.resolve_execution_config", lambda cfg: execution_config())
++def test_sessions_have_independent_reset_and_request_state():
++    server = PolicyServer(object(), object(), session_isolation=True)
++    first = server.new_session()
++    second = server.new_session()
++
++    with pytest.raises(ValueError, match="must reset"):
++        server.predict({}, session=first)
++
++    first.reset()
++    second.reset()
++    first_result = server.predict({}, session=first)
++    second_result = server.predict({}, session=second)
++    assert first_result["step"] == 1
++    assert first_result["action"] == [1.0]
++    assert second_result["step"] == 1
++    assert second_result["action"] == [1.0]
++
++    first.reset()
++    assert server.predict({}, session=first)["step"] == 1
++    assert server.predict({}, session=second)["step"] == 2
++
++    first.shutdown()
++    second.shutdown()
++    assert first.policy.shutdown_called
++    assert second.policy.shutdown_called
++
++
++@patch("openwam.deploy.policy.WAMPolicy", FakePolicy)
++@patch("openwam.deploy.executors.resolve_execution_config", lambda cfg: execution_config(enabled=True))
++def test_session_isolation_rejects_async_executor():
++    server = PolicyServer(object(), object(), session_isolation=True)
++    with pytest.raises(ValueError, match="synchronous executor"):
++        server._init_policy()

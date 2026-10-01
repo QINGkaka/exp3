@@ -147,6 +147,16 @@ run has 200/200 task-condition-model cells and 20,000 rollouts.
 The released-checkpoint smoke run only verifies the pipeline. It is not formal
 OOD evidence because those checkpoints were not trained with this 40/10 split.
 
+## Split-host OpenWAM Runs
+
+For deployments where RoboTwin rendering and OpenWAM inference run on separate
+GPU hosts, use `run_openwam_remote_formal.py`. It keeps one model server resident
+per inference GPU, supports multiple isolated simulator clients per server,
+dynamically assigns task-condition jobs, reuses completed result parts after a
+restart, and monitors SSH tunnels with keepalives. See
+[`REMOTE_PARALLEL.md`](REMOTE_PARALLEL.md) and apply
+`patches/openwam-session-isolation.patch` to the verified OpenWAM revision.
+
 ## Outputs
 
 Each run is written under `runs/<run-id>/` and includes:

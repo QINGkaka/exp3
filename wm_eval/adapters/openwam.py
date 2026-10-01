@@ -84,6 +84,7 @@ class OpenWAMAdapter:
         env = self.context.environment()
         host = str(config["hardware"]["openwam_host"])
         port = int(config["hardware"]["openwam_port"])
+        manage_server = bool(config["hardware"].get("openwam_manage_server", True))
         server_dir = run_root / self.family / method
         server_log_path = server_dir / "server.log"
         server_command = [
@@ -95,8 +96,16 @@ class OpenWAMAdapter:
             "--port", str(port),
             *model.get("deploy_args", []),
         ]
+        if config["hardware"].get("openwam_session_isolation", False):
+            server_command.append("--session-isolation")
         server_dir.mkdir(parents=True, exist_ok=True)
-        if dry_run:
+        if not manage_server:
+            server_log_path.write_text(
+                f"external OpenWAM server: ws://{host}:{port}\n", encoding="utf-8"
+            )
+            server = None
+            server_log = None
+        elif dry_run:
             server_log_path.write_text(" ".join(server_command) + "\n", encoding="utf-8")
             server = None
             server_log = None
@@ -241,7 +250,7 @@ class OpenWAMAdapter:
                         task_rows=list(rows.values()),
                     )
         finally:
-            if server is not None:
+            if manage_server and server is not None:
                 try:
                     os.killpg(server.pid, signal.SIGTERM)
                 except ProcessLookupError:
