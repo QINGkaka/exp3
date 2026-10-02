@@ -115,13 +115,18 @@ def remote_command(
 def copy_existing_parts(
     run_root: Path, worker: int, split: str, tasks: list[str], method: str,
     *, state: int | None = None, resume_roots: list[Path] | None = None,
-    rollouts_per_state: int | None = None,
+    rollouts_per_state: int | None = None, conditions: list[str] | None = None,
 ) -> int:
     """Reuse immutable part files across worker plans and prior run directories."""
     copied = 0
     source_roots = [run_root, *(resume_roots or [])]
+    modes = (
+        [CONDITIONS[condition] for condition in conditions]
+        if conditions is not None
+        else list(CONDITIONS.values())
+    )
     for task in tasks:
-        for mode in CONDITIONS.values():
+        for mode in modes:
             destination = (
                 run_root / f"worker_{worker:02d}" / split / "openwam" / method / split
                 / "raw" / task / mode / "parts"
@@ -486,6 +491,7 @@ def main() -> int:
                             run_root, worker, split, [task], method, state=state,
                             resume_roots=resume_roots,
                             rollouts_per_state=rollouts_per_state,
+                            conditions=[condition],
                         )
                         if copied:
                             print(
@@ -596,6 +602,11 @@ def main() -> int:
                         run_root, item["worker"], split, selected, method,
                         resume_roots=resume_roots,
                         rollouts_per_state=rollouts_per_state,
+                        conditions=(
+                            list(CONDITIONS)
+                            if args.condition == "all"
+                            else [args.condition]
+                        ),
                     )
                     if copied:
                         print(
