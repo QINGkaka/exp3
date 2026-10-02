@@ -182,6 +182,19 @@ def main() -> int:
     parser.add_argument("--remote-python", required=True, help="Remote Python with the OpenWAM environment")
     parser.add_argument("--remote-no-wm-checkpoint", required=True)
     parser.add_argument("--remote-wm-checkpoint", required=True)
+    parser.add_argument(
+        "--remote-text-embedding-cache",
+        default=(
+            "/home/data/tmp/hanwen.cui/openwam/robotwin_text_embeddings/"
+            "wan22_ti2v_5b_umt5_xxl_bf16_clean50"
+        ),
+        help="Remote precomputed UMT5 cache directory",
+    )
+    parser.add_argument(
+        "--no-text-embedding-cache",
+        action="store_true",
+        help="Load Wan T5 instead of using the configured precomputed embedding cache",
+    )
     parser.add_argument("--remote-gpus", type=parse_gpus, default=parse_gpus("0-7"))
     parser.add_argument("--sim-gpus", type=parse_gpus, default=parse_gpus("0-7"))
     parser.add_argument("--servers-per-gpu", type=int, default=1)
@@ -295,14 +308,22 @@ def main() -> int:
         return 0
 
     if not args.no_sync_server:
-        subprocess.run(
-            [
-                "rsync", "-a", "-e", "ssh",
-                str(Path(base["paths"]["openwam_repo"]) / "openwam/deploy/server.py"),
-                f"{args.remote_host}:{args.remote_openwam_repo}/openwam/deploy/server.py",
-            ],
-            check=True,
+        local_openwam = Path(base["paths"]["openwam_repo"])
+        runtime_files = (
+            "openwam/deploy/server.py",
+            "openwam/deploy/model_loader.py",
+            "openwam/model/video_backbone/wan_backbone.py",
+            "openwam/model/video_backbone/wan/text_embedding_cache.py",
         )
+        for relative_path in runtime_files:
+            subprocess.run(
+                [
+                    "rsync", "-a", "-e", "ssh",
+                    str(local_openwam / relative_path),
+                    f"{args.remote_host}:{args.remote_openwam_repo}/{relative_path}",
+                ],
+                check=True,
+            )
 
     control_stem = uuid.uuid4().hex[:12]
     # OpenSSH servers commonly cap multiplexed sessions at 10. Keep each
@@ -365,6 +386,8 @@ def main() -> int:
                 logs.append(server_log)
                 command = [
                     "env", f"CUDA_VISIBLE_DEVICES={item['remote_gpu']}",
+                    f"OPENWAM_TEXT_EMBEDDING_CACHE_DIR={args.remote_text_embedding_cache}",
+                    f"OPENWAM_DISABLE_TEXT_EMBEDDING_CACHE={int(args.no_text_embedding_cache)}",
                     args.remote_python,
                     f"{args.remote_openwam_repo}/scripts/deploy.py",
                     "--ckpt-dir", checkpoints[method],
