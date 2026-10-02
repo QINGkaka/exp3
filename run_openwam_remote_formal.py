@@ -114,10 +114,12 @@ def remote_command(
 
 def copy_existing_parts(
     run_root: Path, worker: int, split: str, tasks: list[str], method: str,
-    *, state: int | None = None,
+    *, state: int | None = None, resume_roots: list[Path] | None = None,
+    rollouts_per_state: int | None = None,
 ) -> int:
-    """Reuse valid immutable part files even when an 8-worker plan reassigns a task."""
+    """Reuse immutable part files across worker plans and prior run directories."""
     copied = 0
+    source_roots = [run_root, *(resume_roots or [])]
     for task in tasks:
         for mode in CONDITIONS.values():
             destination = (
@@ -125,22 +127,31 @@ def copy_existing_parts(
                 / "raw" / task / mode / "parts"
             )
             pattern = f"s{state:03d}_r*.json" if state is not None else "*.json"
-            sources = run_root.glob(
-                f"worker_*/{split}/openwam/{method}/{split}/raw/{task}/{mode}/parts/{pattern}"
-            )
-            for source in sources:
-                target = destination / source.name
-                if target.exists() or source == target:
-                    continue
-                try:
-                    payload = json.loads(source.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload.get("episodes"), list):
-                    continue
-                destination.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-                copied += 1
+            for source_root in source_roots:
+                sources = source_root.glob(
+                    f"worker_*/{split}/openwam/{method}/{split}/raw/"
+                    f"{task}/{mode}/parts/{pattern}"
+                )
+                for source in sources:
+                    target = destination / source.name
+                    if target.exists() or source == target:
+                        continue
+                    try:
+                        payload = json.loads(source.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    rollout_index = payload.get("rollout_index")
+                    if (
+                        rollouts_per_state is not None
+                        and isinstance(rollout_index, int)
+                        and rollout_index >= rollouts_per_state
+                    ):
+                        continue
+                    if not isinstance(payload.get("episodes"), list):
+                        continue
+                    destination.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+                    copied += 1
     return copied
 
 
@@ -177,6 +188,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=ROOT / "config.openwam.formal.json")
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument(
+        "--resume-from", type=Path, action="append", default=[],
+        help="Prior run root to search for reusable per-rollout results (repeatable)",
+    )
     parser.add_argument("--remote-host", required=True, help="SSH host or config alias")
     parser.add_argument("--remote-openwam-repo", required=True, help="OpenWAM checkout on the remote host")
     parser.add_argument("--remote-python", required=True, help="Remote Python with the OpenWAM environment")
@@ -252,6 +267,10 @@ def main() -> int:
     worker_count = server_count * args.clients_per_server
     assignments = assign_tasks(tasks, limits, worker_count)
     run_root = args.run_dir.resolve()
+    resume_roots = [path.resolve() for path in args.resume_from]
+    missing_resume_roots = [path for path in resume_roots if not path.is_dir()]
+    if missing_resume_roots:
+        parser.error(f"resume root(s) do not exist: {missing_resume_roots}")
     config_root = run_root / "remote_configs"
     log_root = run_root / "remote_logs"
     config_root.mkdir(parents=True, exist_ok=True)
@@ -464,7 +483,9 @@ def main() -> int:
                     ) -> None:
                         worker = item["worker"]
                         copied = copy_existing_parts(
-                            run_root, worker, split, [task], method, state=state
+                            run_root, worker, split, [task], method, state=state,
+                            resume_roots=resume_roots,
+                            rollouts_per_state=rollouts_per_state,
                         )
                         if copied:
                             print(
@@ -571,7 +592,11 @@ def main() -> int:
                     selected = split_for_tasks(item["tasks"]).get(split, [])
                     if not selected:
                         continue
-                    copied = copy_existing_parts(run_root, item["worker"], split, selected, method)
+                    copied = copy_existing_parts(
+                        run_root, item["worker"], split, selected, method,
+                        resume_roots=resume_roots,
+                        rollouts_per_state=rollouts_per_state,
+                    )
                     if copied:
                         print(
                             f"[remote-formal] W{item['worker']:02d} reused {copied} existing part(s)",
