@@ -31,7 +31,7 @@ python run_openwam_remote_formal.py \
   --remote-wm-checkpoint /srv/checkpoints/wm \
   --remote-gpus 0-7 \
   --sim-gpus 0-7 \
-  --clients-per-server 3 \
+  --clients-per-server 4 \
   --remote-port-base 8848 \
   --local-port-base 9848 \
   --methods all \
@@ -43,6 +43,12 @@ The command is restart-safe. Run it again with the same run directory after a
 failure; valid `parts/*.json` files are preserved and skipped. The launcher
 synchronizes only `openwam/deploy/server.py` to the remote OpenWAM checkout so
 the server and local orchestration use the same session-isolation protocol.
+
+The formal default is four clients per model server. A same-task A/B run on one
+RTX 5090 simulation GPU and one H100 inference GPU completed 8/8 rollouts in
+1007 seconds with four clients versus 2088 seconds with three clients. Peak
+simulation-GPU memory was 22,568 MiB with four clients; five clients reached
+29,482 MiB and left too little headroom for the formal run.
 
 ## tmux
 
@@ -72,6 +78,7 @@ python run_openwam_remote_formal.py \
   --remote-wm-checkpoint /srv/checkpoints/wm \
   --remote-gpus 1 \
   --sim-gpus 7 \
+  --clients-per-server 1 \
   --remote-port-base 8949 \
   --local-port-base 9949 \
   --methods no_wm \

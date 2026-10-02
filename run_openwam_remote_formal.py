@@ -185,7 +185,7 @@ def main() -> int:
     parser.add_argument("--remote-gpus", type=parse_gpus, default=parse_gpus("0-7"))
     parser.add_argument("--sim-gpus", type=parse_gpus, default=parse_gpus("0-7"))
     parser.add_argument("--servers-per-gpu", type=int, default=1)
-    parser.add_argument("--clients-per-server", type=int, default=1)
+    parser.add_argument("--clients-per-server", type=int, default=4)
     parser.add_argument("--remote-port-base", type=int, default=8848)
     parser.add_argument("--local-port-base", type=int, default=9848)
     parser.add_argument("--methods", choices=("no_wm", "wm", "all"), default="all")
