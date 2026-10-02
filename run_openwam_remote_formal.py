@@ -390,7 +390,10 @@ def main() -> int:
                 logs.append(tunnel_log)
                 tunnel = subprocess.Popen(
                     [
-                        "ssh", *ssh_control_args(tunnel_control_paths[control_group]), "-N",
+                        # Keep the forwarding client alive so its process state is a
+                        # reliable health signal. A multiplexed `ssh -N` can install
+                        # the forwarding on the master and then exit successfully.
+                        "ssh", *SSH_KEEPALIVE_ARGS, "-N",
                         "-o", "ExitOnForwardFailure=yes",
                         "-L", f"127.0.0.1:{item['local_port']}:127.0.0.1:{item['remote_port']}",
                         args.remote_host,

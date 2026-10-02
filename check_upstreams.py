@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 from pathlib import Path
 
@@ -32,14 +33,23 @@ def main() -> None:
     args = parser.parse_args()
     config_path = args.config.resolve()
     config = resolve_config_paths(load_json(config_path), config_path)
+    snapshot_file = Path(__file__).with_name("upstream_revisions.json")
+    snapshot_revisions = json.loads(snapshot_file.read_text()) if snapshot_file.is_file() else {}
 
     failed = False
     for key, expected in EXPECTED.items():
         repo = Path(config["paths"][key])
         actual = git(repo, "rev-parse", "HEAD")
+        source = "git"
+        if not actual:
+            actual = snapshot_revisions.get(key, "")
+            source = "snapshot manifest"
         dirty = git(repo, "status", "--porcelain", "--untracked-files=no").splitlines()
         state = "OK" if actual == expected else "DIFFERS"
-        print(f"{key}: {state} expected={expected[:12]} actual={actual[:12] or 'missing'}")
+        print(
+            f"{key}: {state} expected={expected[:12]} "
+            f"actual={actual[:12] or 'missing'} source={source}"
+        )
         if key == "fastwam_repo":
             dirty_paths = {line.split(maxsplit=1)[-1] for line in dirty}
             unexpected = sorted(dirty_paths - FASTWAM_PATCHED_FILES)
